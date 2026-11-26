@@ -176,6 +176,71 @@ def flow9_stream_export_matrix():
     return {"data": cross_service.query_stream_export_matrix()}
 
 
+# ==================== Flow 10: ts_store + batch_export 冷热分层跨层导出 ====================
+
+@router.post("/flow10/cross-tier-export")
+def flow10_submit_cross_tier_export(
+    strategy_id: str | None = Query(default=None, description="冷热策略编号或行id"),
+    point_id: str | None = Query(default=None),
+    retention_days: int | None = Query(default=None, description="总保留天数"),
+    hot_days: int | None = Query(default=None, description="热层天数"),
+    export_days: int | None = Query(default=None, description="准备导出的天数"),
+    points_per_day: int = Query(default=100),
+    bytes_per_point: int = Query(default=32),
+    compression: str = Query(default="none"),
+    device_range: str = Query(default=""),
+):
+    """从冷热策略表提交跨层导出，返回分层读取计划。"""
+    return cross_service.submit_tiered_export_from_store(
+        strategy_id, point_id, retention_days, hot_days, export_days,
+        points_per_day, bytes_per_point, compression, device_range,
+    )
+
+
+@router.get("/flow10/plan/{ref}")
+def flow10_plan(ref: str):
+    return cross_service.query_tiered_export_plan(ref)
+
+
+@router.post("/flow10/{ref}/claim")
+def flow10_claim(
+    ref: str,
+    segment_ids: str | None = Query(default=None, description="逗号分隔的冷段id"),
+    dates: str | None = Query(default=None),
+    count: int | None = Query(default=None),
+    pick: str = Query(default="older"),
+):
+    return cross_service.claim_cold_segments_for_export(
+        ref,
+        segment_ids=[s for s in (segment_ids or "").split(",") if s],
+        dates=[d for d in (dates or "").split(",") if d],
+        count=count, pick=pick,
+    )
+
+
+@router.post("/flow10/{ref}/segments/{segment_ref}/confirm")
+def flow10_confirm(ref: str, segment_ref: str):
+    return cross_service.confirm_cold_segment_for_export(ref, segment_ref)
+
+
+@router.post("/flow10/{ref}/cleanup")
+def flow10_cleanup(ref: str, retention_days: int | None = None, hot_days: int | None = None):
+    return cross_service.cleanup_cold_tier_for_export(
+        ref, retention_days=retention_days, hot_days=hot_days)
+
+
+@router.post("/flow10/retention")
+def flow10_retention(
+    ref: str | None = Query(default=None),
+    strategy_id: str | None = Query(default=None),
+    retention_days: int | None = Query(default=None),
+    hot_days: int | None = Query(default=None),
+):
+    return cross_service.change_retention_for_export(
+        ref, strategy_ref=strategy_id,
+        retention_days=retention_days, hot_days=hot_days)
+
+
 # ==================== 跨模块概览 ====================
 
 @router.get("/overview")

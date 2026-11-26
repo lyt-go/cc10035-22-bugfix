@@ -900,6 +900,83 @@ class CrossModuleService:
         return result
 
     # ========================
+    # Flow 10: ts_store + batch_export → 冷热分层跨层导出
+    # ========================
+
+    def submit_tiered_export_from_store(
+        self,
+        strategy_id: str | int | None = None,
+        point_id: str | None = None,
+        retention_days: int | None = None,
+        hot_days: int | None = None,
+        export_days: int | None = None,
+        points_per_day: int | None = 100,
+        bytes_per_point: int | None = 32,
+        compression: str | None = "none",
+        device_range: str = "",
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """从冷热策略表提交跨层导出，返回可核对实际读取区间的分层读取计划。"""
+        from app.services.tiered_plan import tiered_exports
+
+        plan = tiered_exports.create_plan(
+            strategy_ref=strategy_id,
+            point_id=point_id,
+            retention_days=retention_days,
+            hot_days=hot_days,
+            requested_days=export_days if export_days is not None else extra.get("requested_days"),
+            points_per_day=points_per_day,
+            bytes_per_point=bytes_per_point,
+            compression=compression,
+            device_range=device_range,
+            today=extra.get("today"),
+        )
+        return {
+            "ok": True,
+            "message": f"跨层导出已提交，分层读取计划：{plan['plan_no']}",
+            "plan_no": plan["plan_no"],
+            "task_no": plan["task_no"],
+            "export_task_id": plan["task_id"],
+            "plan": tiered_exports.detail(plan["plan_no"]),
+        }
+
+    # 语义别名
+    submit_cross_tier_export = submit_tiered_export_from_store
+    flow10_submit = submit_tiered_export_from_store
+    # 与 stream_to_batch_export 命名平行的 Flow 10 别名
+    store_to_batch_export = submit_tiered_export_from_store
+    ts_store_to_batch_export = submit_tiered_export_from_store
+    ts_store_export = submit_tiered_export_from_store
+
+    def query_tiered_export_plan(self, ref: str | int) -> dict[str, Any]:
+        from app.services.tiered_plan import tiered_exports
+
+        plan = tiered_exports.detail(ref)
+        if plan is None:
+            return {"ok": False, "message": f"分层导出计划 {ref} 不存在"}
+        return {"ok": True, "data": plan, "plan": plan}
+
+    def claim_cold_segments_for_export(self, ref: str | int, **selector: Any) -> dict[str, Any]:
+        from app.services.tiered_plan import tiered_exports
+
+        return tiered_exports.claim(ref, **selector)
+
+    def confirm_cold_segment_for_export(self, ref: str | int, segment_ref: str) -> dict[str, Any]:
+        from app.services.tiered_plan import tiered_exports
+
+        return tiered_exports.confirm_segment(ref, segment_ref)
+
+    def cleanup_cold_tier_for_export(self, ref: str | int | None = None, **policy: Any) -> dict[str, Any]:
+        from app.services.tiered_plan import tiered_exports
+
+        return tiered_exports.cleanup_cold_tier(ref, **policy)
+
+    def change_retention_for_export(self, ref: str | int | None = None, **policy: Any) -> dict[str, Any]:
+        from app.services.tiered_plan import tiered_exports
+
+        return tiered_exports.apply_retention_change(ref, **policy)
+
+    # ========================
     # 跨模块概览 Dashboard
     # ========================
 
@@ -926,6 +1003,7 @@ class CrossModuleService:
             ("gateway_mgmt", "edge_cache", "网关管理与边缘缓存"),
             ("firmware_ota", "aggregate_sink", "固件升级与聚合分发"),
             ("data_stream", "batch_export", "数据流管道与批量导出"),
+            ("ts_store", "batch_export", "冷热分层跨层导出"),
         ]
 
         for mod_a, mod_b, label in flow_pairs:

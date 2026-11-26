@@ -94,5 +94,50 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
 def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
+    action = payload.action.strip()
+    # 部分领域动作（如“跨层导出”）允许通过 remark 传 JSON 参数；
+    # 基类动作签名不接收 remark，遇到 TypeError 时回退到两参调用。
+    try:
+        entry, message = service.run_action(entry_id, action, payload.remark)  # type: ignore[call-arg]
+    except TypeError:
+        entry, message = service.run_action(entry_id, action)
     return ActionResult(ok=entry is not None, message=message, entry=entry)
+
+
+async def _parse_update_values(request: Request) -> dict:
+    """同时兼容 {"values": {...}} 与扁平 JSON / 表单更新。"""
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if isinstance(body, dict):
+            if isinstance(body.get("values"), dict):
+                return body["values"]
+            return {k: v for k, v in body.items() if k not in {"remark"}}
+    if "form" in content_type:
+        form = await request.form()
+        if "values" in form:
+            import json
+            try:
+                return json.loads(str(form["values"]))
+            except ValueError:
+                pass
+        return dict(form)
+    return {}
+
+
+@router.put("/{module}/{entry_id}")
+async def update_entry_put(module: str, entry_id: int, request: Request) -> dict:
+    service = require_service(module)
+    values = await _parse_update_values(request)
+    entry, updated = service.update_entry(entry_id, values)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"{service.ENTITY} {entry_id} 不存在或已归档")
+    return {"ok": True, "message": f"{service.ENTITY}已更新", "entry": entry, "updated_fields": updated}
+
+
+@router.patch("/{module}/{entry_id}")
+async def update_entry_patch(module: str, entry_id: int, request: Request) -> dict:
+    return await update_entry_put(module, entry_id, request)

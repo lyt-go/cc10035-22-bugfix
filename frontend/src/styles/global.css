@@ -70,3 +70,8 @@ body { margin: 0; background: #f6f8fb; color: #1f2937; }
 .analysis-chart { display: flex; align-items: flex-end; gap: 8px; height: 160px; padding: 12px 0; }
 .analysis-bar { flex: 1; border-radius: 4px 4px 0 0; background: var(--brand); min-width: 24px; position: relative; transition: height 0.4s; }
 .analysis-bar span { position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%); font-size: 10px; color: var(--muted); white-space: nowrap; }
+
+/* 跨层导出 / 导出详情 */
+.cell-link { color: var(--brand); text-decoration: none; }
+.cell-link:hover { text-decoration: underline; }
+.cross-tier-action { font-weight: 600; }

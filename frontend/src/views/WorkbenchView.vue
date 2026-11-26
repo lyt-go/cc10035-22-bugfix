@@ -15,6 +15,15 @@
       </div>
     </header>
 
+    <div ref="plannerAnchor">
+      <StoragePlannerPanel
+        v-if="moduleKey === 'ts_store'"
+        ref="plannerPanelRef"
+        :strategy="presetStrategy"
+        data-testid="ts-store-planner"
+      />
+    </div>
+
     <div class="stat-row">
       <article v-for="item in stats" :key="item.label" class="stat-card">
         <span class="stat-label">{{ item.label }}</span>
@@ -47,9 +56,35 @@
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
-          <td v-for="column in meta.fields" :key="column">{{ row[column] ?? '—' }}</td>
+          <td v-for="column in meta.fields" :key="column">
+            <RouterLink
+              v-if="moduleKey === 'batch_export' && column === '任务编号'"
+              :to="`/batch_export/${row.id}`"
+              :data-testid="`detail-link-${row.id}`"
+              class="cell-link"
+            >{{ row[column] ?? '—' }}</RouterLink>
+            <template v-else>{{ row[column] ?? '—' }}</template>
+          </td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
+            <button
+              v-if="moduleKey === 'ts_store'"
+              class="link cross-tier-action"
+              type="button"
+              :data-testid="`action-${row.id}-跨层导出`"
+              :data-cross-export-id="row.id"
+              @click="crossExportFromRow(row)"
+            >
+              跨层导出
+            </button>
+            <RouterLink
+              v-if="moduleKey === 'batch_export'"
+              class="link"
+              :to="`/batch_export/${row.id}`"
+              :data-testid="`detail-action-${row.id}`"
+            >
+              导出详情
+            </RouterLink>
             <button
               v-for="action in meta.actions"
               :key="action"
@@ -94,8 +129,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
+import StoragePlannerPanel from '@/components/StoragePlannerPanel.vue'
 import {
   createEntry,
   downloadEntries,
@@ -106,25 +142,28 @@ import {
 import type { EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
-const meta = moduleMeta(props.moduleKey)
+const meta = computed(() => moduleMeta(props.moduleKey))
 const rows = ref<EntryRow[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
-const filterFields = meta.fields.slice(0, 3)
+const filterFields = computed(() => meta.value.fields.slice(0, 3))
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+const presetStrategy = ref<EntryRow | null>(null)
+const plannerAnchor = ref<HTMLElement | null>(null)
+const plannerPanelRef = ref<InstanceType<typeof StoragePlannerPanel> | null>(null)
 const stats = computed(() => [
-  { label: meta.metrics[0], value: total.value },
-  { label: meta.metrics[1], value: rows.value.filter((row) => row.status === meta.statuses[1]).length },
+  { label: meta.value.metrics[0], value: total.value },
+  { label: meta.value.metrics[1], value: rows.value.filter((row) => row.status === meta.value.statuses[1]).length },
   {
-    label: meta.metrics[2],
-    value: rows.value.filter((row) => row.status === meta.statuses[meta.statuses.length - 1]).length,
+    label: meta.value.metrics[2],
+    value: rows.value.filter((row) => row.status === meta.value.statuses[meta.value.statuses.length - 1]).length,
   },
 ])
 const statusSummary = computed(() =>
-  meta.statuses.map((status) => ({
+  meta.value.statuses.map((status) => ({
     status,
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
@@ -135,17 +174,26 @@ function resetFilters() {
   void reload()
 }
 
+async function crossExportFromRow(row: EntryRow) {
+  // 用浅拷贝保证重复点击同一行也会触发面板的 watch
+  presetStrategy.value = { ...row }
+  plannerAnchor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  // 从冷热策略表直接“提交跨层导出”：回填并生成分层读取计划
+  await nextTick()
+  await plannerPanelRef.value?.bindAndSubmit({ ...row })
+}
+
 async function exportRows() {
   errorMessage.value = ''
   try {
-    await downloadEntries(meta.key, filters.value)
+    await downloadEntries(meta.value.key, filters.value)
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '导出失败'
   }
 }
 
 function openCreate() {
-  createValues.value = Object.fromEntries(meta.fields.map((field) => [field, '']))
+  createValues.value = Object.fromEntries(meta.value.fields.map((field) => [field, '']))
   errorMessage.value = ''
   showCreate.value = true
 }
@@ -154,7 +202,7 @@ async function submitCreate() {
   creating.value = true
   errorMessage.value = ''
   try {
-    const result = await createEntry(meta.key, createValues.value)
+    const result = await createEntry(meta.value.key, createValues.value)
     if (!result.ok) throw new Error(result.message)
     showCreate.value = false
     await reload()
@@ -168,7 +216,7 @@ async function submitCreate() {
 async function runAction(action: string, row: EntryRow) {
   errorMessage.value = ''
   try {
-    const result = await applyAction(meta.key, Number(row.id), action)
+    const result = await applyAction(meta.value.key, Number(row.id), action)
     if (!result.ok) throw new Error(result.message)
     await reload()
   } catch (error) {
@@ -179,13 +227,22 @@ async function runAction(action: string, row: EntryRow) {
 async function reload() {
   errorMessage.value = ''
   try {
-    const payload = await listEntries(meta.key, filters.value)
+    const payload = await listEntries(meta.value.key, filters.value)
     rows.value = payload.items
     total.value = payload.total
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '业务列表读取失败'
   }
 }
+
+watch(
+  () => props.moduleKey,
+  () => {
+    filters.value = {}
+    presetStrategy.value = null
+    void reload()
+  },
+)
 
 onMounted(reload)
 </script>

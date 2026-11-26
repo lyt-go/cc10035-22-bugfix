@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.tiered_plan import tiered_exports
 from app.store import store
 
 CST = timezone(timedelta(hours=8))
@@ -313,32 +314,172 @@ class BatchExportService(BaseModuleService):
             if row.get("测点编号") == point_id and row.get("status") == "已生效":
                 strategy = row
                 break
+        if strategy is None:
+            for row in ts_store_rows:
+                if row.get("策略编号") == point_id and row.get("status") == "已生效":
+                    strategy = row
+                    break
+        if strategy is None:
+            # 兼容刚登记、尚未点“标记生效”的策略行
+            for row in ts_store_rows:
+                if row.get("测点编号") == point_id or row.get("策略编号") == point_id:
+                    strategy = row
+                    break
 
         if strategy is None:
             return {"ok": False, "message": f"测点 {point_id} 无已生效的存储策略"}
 
-        try:
-            retention_days = int(strategy.get("保留天数", "30"))
-        except (ValueError, TypeError):
-            retention_days = 30
+        from app.services.tiered_plan import build_read_plan, parse_compression, parse_days
 
-        compressor = strategy.get("压缩算法", "none")
-        compression_ratio = {"gzip": 5, "snappy": 2, "lz4": 3, "zstd": 6, "none": 1}.get(compressor, 2)
+        retention_days = parse_days(strategy.get("保留天数", "30"), 30)
+        hot_days = parse_days(strategy.get("热层天数", strategy.get("冷热分层", "30")), 30)
+        points_per_day = parse_days(strategy.get("每日点数"), 86400) or 86400
+        bytes_per_point = parse_days(strategy.get("每点字节"), 32) or 32
+
+        compressor = strategy.get("压缩算法", "none") or "none"
+        _, compression_ratio = parse_compression(compressor, default=2)
 
         effective_days = min(days, retention_days)
-        daily_rows = 86400  # 每秒一个数据点
+        daily_rows = 86400  # 每秒一个数据点（旧口径保留）
         estimated_rows = daily_rows * effective_days
         raw_bytes = estimated_rows * 32
         compressed_bytes = raw_bytes / compression_ratio
+
+        # 与容量试算、预算共用同一套策略的分层读取计划（实际读取段）
+        read_plan = build_read_plan(
+            retention_days=retention_days,
+            hot_days=hot_days,
+            requested_days=days,
+            points_per_day=points_per_day,
+            bytes_per_point=bytes_per_point,
+            compression=compressor,
+            compression_ratio=compression_ratio,
+        )
 
         return {
             "ok": True,
             "point_id": point_id,
             "storage_retention_days": retention_days,
+            "hot_days": read_plan["hot_days"],
+            "cold_days": read_plan["cold_days"],
             "query_days": days,
             "effective_days": effective_days,
             "estimated_rows": estimated_rows,
             "estimated_size_mb": round(compressed_bytes / (1024 * 1024), 2),
             "compression": compressor,
             "compression_ratio": compression_ratio,
+            "hot_storage_bytes": read_plan["hot_storage_bytes"],
+            "cold_storage_bytes": read_plan["cold_storage_bytes"],
+            "total_storage_bytes": read_plan["total_bytes"],
+            "read_plan": read_plan,
+            "tiered_plan": read_plan,
+            "segments": read_plan["dates"],
+        }
+
+    # ========== 冷热分层跨层导出（Flow 10） ==========
+    #
+    # 所有日期区间、容量、预算与冷段状态都由 tiered_exports 统一生成，
+    # 保证“两层日期和预算使用同一套策略”。
+
+    def get_entry(self, entry_id: int) -> dict[str, Any] | None:
+        """通用详情：导出任务额外挂载完整分层读取计划与分段。"""
+        entry = super().get_entry(entry_id)
+        if entry is None:
+            return None
+        plan = tiered_exports.detail(entry_id) or tiered_exports.detail(entry.get("任务编号", ""))
+        if plan is not None:
+            entry["read_plan"] = plan
+            entry["plan"] = plan
+            entry["segments"] = plan.get("segments", [])
+            entry["billing"] = plan.get("billing")
+        return entry
+
+    def prepare_tiered_export(self, **params: Any) -> dict[str, Any]:
+        """准备/提交跨层导出，返回带实际读取区间的分层读取计划。"""
+        plan = tiered_exports.create_plan(**params)
+        return {"ok": True, "message": f"分层读取计划已生成：{plan['plan_no']}", "plan": plan}
+
+    create_cross_tier_export = prepare_tiered_export
+    submit_cross_tier_export = prepare_tiered_export
+    create_tiered_export = prepare_tiered_export
+
+    def export_from_ts_store(self, point_id: str = "", days: int | None = None, **params: Any) -> dict[str, Any]:
+        """与 export_from_stream_source 平行的命名：从时序存储策略发起跨层导出。"""
+        strategy_ref = params.pop("strategy_ref", None)
+        requested_days = params.pop("requested_days", None)
+        if days is not None:
+            requested_days = days
+        strategy = tiered_exports.find_strategy(strategy_ref, point_id or None)
+        if strategy is None and not point_id and strategy_ref is None:
+            return {"ok": False, "message": "请提供测点编号或策略编号"}
+        ref = strategy.get("id") if strategy is not None else strategy_ref
+        plan = tiered_exports.create_plan(
+            strategy_ref=ref,
+            point_id=point_id or None,
+            requested_days=requested_days,
+            **params,
+        )
+        return {"ok": True, "message": f"从时序存储策略发起跨层导出：{plan['plan_no']}",
+                "plan": plan, "export_task": {
+                    "id": plan.get("task_id"), "任务编号": plan.get("task_no")}}
+
+    def get_read_plan(self, ref: Any) -> dict[str, Any]:
+        plan = tiered_exports.detail(ref)
+        if plan is None:
+            return {"ok": False, "message": f"导出任务/计划 {ref} 不存在"}
+        return {"ok": True, "plan": plan, "read_plan": plan}
+
+    get_tiered_read_plan = get_read_plan
+    read_plan_detail = get_read_plan
+
+    def claim_cold_segments(self, ref: Any, **selector: Any) -> dict[str, Any]:
+        return tiered_exports.claim(ref, **selector)
+
+    claim_cold_segment = claim_cold_segments
+
+    def read_segment(self, ref: Any, segment_ref: str) -> dict[str, Any]:
+        return tiered_exports.read_fragments(ref, segment_ref)
+
+    fetch_segment = read_segment
+    read_fragments = read_segment
+
+    def confirm_segment(self, ref: Any, segment_ref: str) -> dict[str, Any]:
+        return tiered_exports.confirm_segment(ref, segment_ref)
+
+    confirm_read_segment = confirm_segment
+
+    def complete_segment(self, ref: Any, segment_ref: str) -> dict[str, Any]:
+        """继续完成仍可读取的等待冷段（幂等，已发片段不重发）。"""
+        return tiered_exports.complete_segment(ref, segment_ref)
+
+    continue_segment = complete_segment
+
+    def cleanup_cold_segments(self, ref: Any = None, **policy: Any) -> dict[str, Any]:
+        """冷层清理：区分 等待读取 / 不可读 / 已交付 冷段。"""
+        return tiered_exports.cleanup_cold_tier(ref, **policy)
+
+    cleanup_cold_tier = cleanup_cold_segments
+
+    def change_retention(self, ref: Any = None, retention_days: Any = None,
+                         hot_days: Any = None, **kwargs: Any) -> dict[str, Any]:
+        """保留策略变更并与在途读取计划对账。"""
+        return tiered_exports.apply_retention_change(
+            ref, retention_days=retention_days, hot_days=hot_days, **kwargs)
+
+    update_retention_policy = change_retention
+
+    def export_detail(self, ref: Any) -> dict[str, Any]:
+        """导出详情页所需的聚合视图：任务行 + 分层计划 + 分段 + 计费。"""
+        task = tiered_exports.get_batch_task(ref)
+        plan = tiered_exports.detail(ref) or (
+            tiered_exports.detail(task.get("id")) if task is not None else None)
+        if task is None and plan is None:
+            return {"ok": False, "message": f"导出任务 {ref} 不存在"}
+        return {
+            "ok": True,
+            "task": task,
+            "plan": plan,
+            "read_plan": plan,
+            "segments": (plan or {}).get("segments", []),
+            "billing": (plan or {}).get("billing"),
         }

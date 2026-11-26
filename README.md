@@ -79,3 +79,36 @@ npm run dev
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA
+
+## 冷热分层与跨层导出（ts_store × batch_export）
+
+容量、分层日期区间、导出预算与冷段生命周期共用 `backend/app/services/tiered_plan.py`
+中的同一套策略，避免“页面容量一套数、导出计划另一套数”。
+
+容量口径：`日字节 = 每日点数 × 每点字节 / 压缩比`；
+`热层实际天数 = min(热层天数, 总保留天数)`（热层超长时只占实际留存天数），
+`冷层天数 = max(总保留 - 热层实际, 0)`，因此热层/冷层日期不重叠，且
+`热层字节 + 冷层字节 = 总保留字节`。例：每天 100 点、每点 32 字节、无压缩、
+保留 5 天、热层 30 天 → 热层 16000、冷层 0。
+
+页面：
+
+- 「时序存储」页顶部可做容量试算，并可直接「提交跨层导出」；每行策略也有
+  「跨层导出」操作（`data-testid="action-<id>-跨层导出"`），回填策略后生成
+  带每个日期实际读取区间的「分层读取计划」。
+- 「批量导出」的任务编号或「导出详情」进入 `/batch_export/:id`，逐段领取 /
+  读取 / 确认 / 继续完成冷段；保留收缩触发冷层清理后，冷段区分为
+  **等待读取 / 不可读（页面标记“已被释放”）/ 已交付**。确认前失去有效读取
+  依据的日期不计费；已发出的片段幂等不重发；费用只按实际可取且确认交付的范围。
+
+主要接口（同时提供 query / JSON body / 中文参数名与多组路径别名）：
+
+- `GET|POST /api/ts_store/capacity`（及 `/estimate`、`/estimate_storage`）
+- `POST /api/tiered-exports`、`GET /api/tiered-exports/{ref}`
+- `POST /api/tiered-exports/{ref}/claim`
+- `POST /api/tiered-exports/{ref}/segments/{seg}/read|confirm|complete`
+- `POST /api/tiered-exports/{ref}/retention|cleanup`
+- `GET /api/batch_export/{ref}/detail`、`GET|POST /api/batch_export/{ref}/read-plan`
+- `PUT|PATCH /api/ts_store/{id}`（改保留天数会自动对账在途计划）
+- Flow 10：`POST /api/cross/flow10/cross-tier-export` 等
+

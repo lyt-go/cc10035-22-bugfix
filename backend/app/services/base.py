@@ -43,6 +43,19 @@ class BaseModuleService:
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
         return store.find(self.MODULE, entry_id)
 
+    def update_entry(self, entry_id: int, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        """更新一条记录的业务字段。返回 (entry, updated_fields)。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None, []
+        updated: list[str] = []
+        allowed = set(self.LIST_FIELDS) | {"status", "每日点数", "每点字节", "热层天数"}
+        for key, value in (values or {}).items():
+            if key in allowed and value is not None:
+                entry[key] = value
+                updated.append(key)
+        return entry, updated
+
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
         missing = [
             field for field in self.REQUIRED_FIELDS
